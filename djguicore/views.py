@@ -34,10 +34,21 @@ class CeleryTaskView(TemplateView):
     def get_context_data(self, **kwargs):
         ctx = super(CeleryTaskView, self).get_context_data(**kwargs)
         task_id = ctx.get('task_id')
-        celery_task = TaskMeta.objects.get(task_id=task_id)
+        try:
+            celery_task = TaskMeta.objects.get(task_id=task_id)
+        except TaskMeta.DoesNotExist:
+            celery_task = None
         djangui_job = DjanguiJob.objects.get(djangui_celery_id=task_id).content_object
-        ctx['task_info'] = {'stdout': celery_task.result[0], 'stderr': celery_task.result[1],
-                            'status': celery_task.status, 'submission_time': djangui_job.created_date,
-                            'last_modified': celery_task.date_done, 'job_name': djangui_job.djangui_job_name,
-                            'job_description': djangui_job.djangui_job_description, 'files': self.get_file_fields(djangui_job)}
+        ctx['task_info'] = {'stdout': '', 'stderr': '',
+                            'status': djangui_job.djangui_celery_state, 'submission_time': djangui_job.created_date,
+                            'last_modified': djangui_job.modified_date, 'job_name': djangui_job.djangui_job_name,
+                            'job_description': djangui_job.djangui_job_description, 'files': {}}
+        if celery_task:
+            ctx['task_info'].update({
+                'stdout': celery_task.result[0],
+                'stderr': celery_task.result[1],
+                'status': celery_task.status,
+                'last_modified': celery_task.date_done,
+                'files': self.get_file_fields(djangui_job)
+            })
         return ctx
