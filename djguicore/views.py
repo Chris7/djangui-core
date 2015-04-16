@@ -3,6 +3,7 @@ from djcelery.models import TaskMeta
 from django.core.urlresolvers import reverse
 from django.views.generic import TemplateView
 from django.conf import settings
+from django.utils.translation import gettext_lazy as _
 from .models import DjanguiJob
 
 def celery_status(request):
@@ -25,6 +26,30 @@ def celery_status(request):
                         'job_id': job.djangui_celery_id,
                         'job_url': reverse('celery_results_info', kwargs={'task_id': job.djangui_celery_id})} for job in jobs], safe=False)
 
+
+def celery_task_command(request):
+    command = request.POST.get('celery-command')
+    task_id = request.POST.get('task-id')
+    job = DjanguiJob.objects.get(djangui_celery_id=task_id)
+    user = None if not request.user.is_authenticated() and settings.DJANGUI_ALLOW_ANONYMOUS else request.user
+    if user != job.djangui_user:
+        response = JsonResponse({})
+    else:
+        if command is None:
+            response = JsonResponse({})
+        if command == 'resubmit':
+            obj = job.content_object.submit_to_celery(resubmit=True)
+            response = JsonResponse({'valid': True, 'extra': {'task_url': reverse('celery_results_info', kwargs={'task_id': obj.djangui_celery_id})}})
+        elif command == 'clone':
+            response = JsonResponse({'valid': True, 'redirect': reverse('celery_job_repopulate', kwargs={'task_id': task_id})})
+        elif command == 'delete':
+            job.delete()
+            response = JsonResponse({'valid': True, 'redirect': reverse('djangui_home')})
+        else:
+            response = JsonResponse({'valid': False, 'errors': {'__all__': _("Unknown Command")}})
+    return response
+
+
 class CeleryTaskView(TemplateView):
     template_name = 'tasks/task_view.html'
 
@@ -39,9 +64,10 @@ class CeleryTaskView(TemplateView):
         except TaskMeta.DoesNotExist:
             celery_task = None
         djangui_job = DjanguiJob.objects.get(djangui_celery_id=task_id).content_object
-        ctx['task_info'] = {'stdout': '', 'stderr': '',
+        ctx['task_info'] = {'stdout': '', 'stderr': '', 'job_id': djangui_job.djangui_celery_id,
                             'status': djangui_job.djangui_celery_state, 'submission_time': djangui_job.created_date,
                             'last_modified': djangui_job.modified_date, 'job_name': djangui_job.djangui_job_name,
+                            'job_command': djangui_job.djangui_command,
                             'job_description': djangui_job.djangui_job_description, 'files': {}}
         if celery_task:
             ctx['task_info'].update({
