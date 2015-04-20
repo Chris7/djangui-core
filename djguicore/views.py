@@ -53,8 +53,36 @@ def celery_task_command(request):
 class CeleryTaskView(TemplateView):
     template_name = 'tasks/task_view.html'
 
-    def get_file_fields(self, model):
-        return dict([(field.name, getattr(model, field.name)) for field in model._meta.fields if getattr(getattr(model, field.name), 'path', False)])
+    @staticmethod
+    def get_file_fields(model):
+        files = dict([(field.name, getattr(model, field.name)) for field in model._meta.fields if getattr(getattr(model, field.name), 'path', False)])
+        # establish grouping by inferring common things
+        file_groups = {'all': files}
+        import imghdr
+        file_groups['images'] = {filename: filemodel for filename, filemodel in files.iteritems() if imghdr.what(filemodel.path)}
+        file_groups['tabular'] = {}
+
+        def test_delimited(filepath):
+            import csv
+            with open(filepath, 'rb') as csv_file:
+                try:
+                    dialect = csv.Sniffer().sniff(csv_file.read(1024*16), delimiters=',\t')
+                except Exception as e:
+                    return False, None
+                csv_file.seek(0)
+                reader = csv.reader(csv_file, dialect)
+                rows = []
+                for index, entry in enumerate(reader):
+                    if index == 5:
+                        break
+                    rows.append(entry)
+                return True, rows
+
+        for filename, filemodel in files.iteritems():
+            is_delimited, first_rows = test_delimited(filemodel.path)
+            if is_delimited:
+                file_groups['tabular'][filename] = {'preview': first_rows, 'model': filemodel}
+        return file_groups
 
     def get_context_data(self, **kwargs):
         ctx = super(CeleryTaskView, self).get_context_data(**kwargs)
@@ -68,13 +96,17 @@ class CeleryTaskView(TemplateView):
                             'status': djangui_job.djangui_celery_state, 'submission_time': djangui_job.created_date,
                             'last_modified': djangui_job.modified_date, 'job_name': djangui_job.djangui_job_name,
                             'job_command': djangui_job.djangui_command,
-                            'job_description': djangui_job.djangui_job_description, 'files': {}}
+                            'job_description': djangui_job.djangui_job_description, 'all_files': {},
+                            'file_groups': {}}
         if celery_task:
+            out_files = self.get_file_fields(djangui_job)
+            all = out_files.pop('all')
             ctx['task_info'].update({
                 'stdout': celery_task.result[0],
                 'stderr': celery_task.result[1],
                 'status': celery_task.status,
                 'last_modified': celery_task.date_done,
-                'files': self.get_file_fields(djangui_job)
+                'all_files': all,
+                'file_groups': out_files,
             })
         return ctx
