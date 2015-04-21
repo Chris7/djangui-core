@@ -59,7 +59,17 @@ class CeleryTaskView(TemplateView):
 
     @staticmethod
     def get_file_fields(model):
-        files = [{'name': field.name, 'url': getattr(getattr(model, field.name), 'url', None)} for field in model._meta.fields if getattr(getattr(model, field.name), 'path', False)]
+        files = []
+        for field in model._meta.fields:
+            try:
+                if getattr(getattr(model, field.name), 'path', False):
+                    d = {'name': field.name}
+                    d['url'] = getattr(getattr(model, field.name), 'url', None)
+                    d['path'] = getattr(getattr(model, field.name), 'path', None)
+                    files.append(d)
+            except ValueError:
+                continue
+
         known_files = {i['url'] for i in files}
         # add the user_output files, these are things which may be missed by the model fields because the script
         # generated them without an explicit argument reference in argparse
