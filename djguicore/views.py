@@ -1,9 +1,13 @@
+import os
+
 from django.http import JsonResponse
-from djcelery.models import TaskMeta
 from django.core.urlresolvers import reverse
 from django.views.generic import TemplateView
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
+
+from djcelery.models import TaskMeta
+
 from .models import DjanguiJob
 
 def celery_status(request):
@@ -22,7 +26,7 @@ def celery_status(request):
     for i in to_update:
         i.save()
     return JsonResponse([{'job_name': job.djangui_job_name, 'job_status': job.djangui_celery_state,
-                        'job_submitted': job.created_date.strftime('%b %d %Y'),
+                        'job_submitted': job.created_date.strftime('%b %d %Y, %H:%M:%S'),
                         'job_id': job.djangui_celery_id,
                         'job_url': reverse('celery_results_info', kwargs={'task_id': job.djangui_celery_id})} for job in jobs], safe=False)
 
@@ -55,12 +59,27 @@ class CeleryTaskView(TemplateView):
 
     @staticmethod
     def get_file_fields(model):
-        files = dict([(field.name, getattr(model, field.name)) for field in model._meta.fields if getattr(getattr(model, field.name), 'path', False)])
+        files = [{'name': field.name, 'url': getattr(getattr(model, field.name), 'url', None)} for field in model._meta.fields if getattr(getattr(model, field.name), 'path', False)]
+        known_files = {i['url'] for i in files}
+        # add the user_output files, these are things which may be missed by the model fields because the script
+        # generated them without an explicit argument reference in argparse
+        file_groups = {'archives': []}
+        absbase = os.path.join(settings.MEDIA_ROOT, model.djangui_save_path)
+        for filename in os.listdir(absbase):
+            url = os.path.join(model.djangui_save_path, filename)
+            if url in known_files:
+                continue
+            d = {'name': filename, 'path': os.path.join(absbase, filename), 'url': '{0}{1}'.format(settings.MEDIA_URL, url)}
+            if filename.startswith('djangui_all'):
+                file_groups['archives'].append(d)
+            else:
+                files.append(d)
+
         # establish grouping by inferring common things
-        file_groups = {'all': files}
+        file_groups['all'] = files
         import imghdr
-        file_groups['images'] = {filename: filemodel for filename, filemodel in files.iteritems() if imghdr.what(filemodel.path)}
-        file_groups['tabular'] = {}
+        file_groups['images'] = [{'name': filemodel['name'], 'url': filemodel['url']} for filemodel in files if imghdr.what(filemodel.get('path', filemodel['url']))]
+        file_groups['tabular'] = []
 
         def test_delimited(filepath):
             import csv
@@ -72,16 +91,19 @@ class CeleryTaskView(TemplateView):
                 csv_file.seek(0)
                 reader = csv.reader(csv_file, dialect)
                 rows = []
-                for index, entry in enumerate(reader):
-                    if index == 5:
-                        break
-                    rows.append(entry)
+                try:
+                    for index, entry in enumerate(reader):
+                        if index == 5:
+                            break
+                        rows.append(entry)
+                except Exception as e:
+                    return False, None
                 return True, rows
 
-        for filename, filemodel in files.iteritems():
-            is_delimited, first_rows = test_delimited(filemodel.path)
+        for filemodel in files:
+            is_delimited, first_rows = test_delimited(filemodel.get('path', filemodel['url']))
             if is_delimited:
-                file_groups['tabular'][filename] = {'preview': first_rows, 'model': filemodel}
+                file_groups['tabular'].append({'name': filemodel['name'], 'preview': first_rows, 'url': filemodel['url']})
         return file_groups
 
     def get_context_data(self, **kwargs):
@@ -101,12 +123,14 @@ class CeleryTaskView(TemplateView):
         if celery_task:
             out_files = self.get_file_fields(djangui_job)
             all = out_files.pop('all')
+            archives = out_files.pop('archives')
             ctx['task_info'].update({
                 'stdout': celery_task.result[0],
                 'stderr': celery_task.result[1],
                 'status': celery_task.status,
                 'last_modified': celery_task.date_done,
                 'all_files': all,
+                'archives': archives,
                 'file_groups': out_files,
             })
         return ctx
