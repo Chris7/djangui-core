@@ -45,7 +45,7 @@ def celery_task_command(request):
             obj = job.content_object.submit_to_celery(resubmit=True)
             response = JsonResponse({'valid': True, 'extra': {'task_url': reverse('celery_results_info', kwargs={'task_id': obj.djangui_celery_id})}})
         elif command == 'clone':
-            response = JsonResponse({'valid': True, 'redirect': reverse('celery_job_repopulate', kwargs={'task_id': task_id})})
+            response = JsonResponse({'valid': True, 'redirect': '{0}?task_id={1}'.format(reverse('djangui_task_launcher'), task_id)})
         elif command == 'delete':
             job.delete()
             response = JsonResponse({'valid': True, 'redirect': reverse('djangui_home')})
