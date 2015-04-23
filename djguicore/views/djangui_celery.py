@@ -5,22 +5,30 @@ from django.core.urlresolvers import reverse
 from django.views.generic import TemplateView
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
+from django.utils.encoding import force_unicode
 
 from djcelery.models import TaskMeta
+from celery import app, states
 
-from .models import DjanguiJob
+celery_app = app.app_or_default()
+
+from ..models import DjanguiJob
 
 def celery_status(request):
     jobs = [job.content_object for job in DjanguiJob.objects.filter(djangui_user=request.user if request.user.is_authenticated() else None)]
-    # TODO: Batch this
+    # TODO: Batch this to a scheduled task
     tasks = [job.djangui_celery_id for job in jobs]
     celery_tasks = dict([(task.task_id, task) for task in TaskMeta.objects.filter(task_id__in=tasks)])
     to_update = []
     for job in jobs:
         celery_task = celery_tasks.get(job.djangui_celery_id)
-        if celery_task is None:
+        if celery_task is None and job.djangui_celery_state != states.FAILURE:
             continue
-        if job.djangui_celery_state != celery_task.status:
+            # the task doesn't exist, consider it a failure
+            # TODO: we can't report these with all backends, code a way to figure out backend and see if this is viable
+            job.djangui_celery_state = states.FAILURE
+            to_update.append(job)
+        elif celery_task is not None and job.djangui_celery_state != celery_task.status:
             job.djangui_celery_state = celery_task.status
             to_update.append(job)
     for i in to_update:
@@ -36,22 +44,22 @@ def celery_task_command(request):
     task_id = request.POST.get('task-id')
     job = DjanguiJob.objects.get(djangui_celery_id=task_id)
     user = None if not request.user.is_authenticated() and settings.DJANGUI_ALLOW_ANONYMOUS else request.user
-    if user != job.djangui_user:
-        response = JsonResponse({})
-    else:
-        if command is None:
-            response = JsonResponse({})
+    response = {'valid': False,}
+    if user == job.djangui_user:
         if command == 'resubmit':
             obj = job.content_object.submit_to_celery(resubmit=True)
-            response = JsonResponse({'valid': True, 'extra': {'task_url': reverse('celery_results_info', kwargs={'task_id': obj.djangui_celery_id})}})
+            response.update({'valid': True, 'extra': {'task_url': reverse('celery_results_info', kwargs={'task_id': obj.djangui_celery_id})}})
         elif command == 'clone':
-            response = JsonResponse({'valid': True, 'redirect': '{0}?task_id={1}'.format(reverse('djangui_task_launcher'), task_id)})
+            response.update({'valid': True, 'redirect': '{0}?task_id={1}'.format(reverse('djangui_task_launcher'), task_id)})
         elif command == 'delete':
             job.delete()
-            response = JsonResponse({'valid': True, 'redirect': reverse('djangui_home')})
+            response.update({'valid': True, 'redirect': reverse('djangui_home')})
+        elif command == 'stop':
+            celery_app.control.revoke(task_id, terminate=True)
+            response.update({'valid': True, 'redirect': reverse('celery_results_info', kwargs={'task_id': task_id})})
         else:
-            response = JsonResponse({'valid': False, 'errors': {'__all__': _("Unknown Command")}})
-    return response
+            response.update({'errors': {'__all__': force_unicode(_("Unknown Command"))}})
+    return JsonResponse(response)
 
 
 class CeleryTaskView(TemplateView):
@@ -144,3 +152,4 @@ class CeleryTaskView(TemplateView):
                 'file_groups': out_files,
             })
         return ctx
+
